@@ -1,0 +1,161 @@
+// This should be in an artifactory/repository so we can just import it as a plugin. You can't do this with gradle as it is so I just add the class here to do it faster
+class ChromeDriverUpdaterTask extends DefaultTask {
+
+    def latestVersion = "unknown"
+    def localVersion = "unknown"
+
+    @Input def chromedriverSiteUrl = "https://chromedriver.storage.googleapis.com"
+
+    @Input def targetDir = "${project.buildDir}/chromedriver"
+    @Input def LOCAL_VER = "$targetDir/LOCAL_VERSION"
+    @Input def driverLocation = getDriverLocation();
+
+    void downloadRemoteFile(String sourceUrl, String target) {
+        def file = new FileOutputStream("$target")
+        def protocolUrlTokens = sourceUrl.tokenize(':')
+        def sourceUrlAsURI = new URI(protocolUrlTokens[0],
+                protocolUrlTokens[1..(protocolUrlTokens.size - 1)].join(":"), "")
+        def out = new BufferedOutputStream(file)
+        out << sourceUrlAsURI.toURL().openStream()
+        out.close()
+    }
+
+    private void downloadFile(def remoteUrl, def target) {
+        logger.info("Downloading $remoteUrl to $target")
+        try {
+            downloadRemoteFile("$remoteUrl", "$target")
+        } catch (Exception e) {
+            getLogger().error("unable to download $remoteUrl, ${e.getMessage()}")
+            throw e
+        }
+    }
+
+    private String calcArch() {
+        def osName = System.getProperty("os.name").toLowerCase()
+        return osName.contains("windows") ? "win" : osName.contains("mac") ? "mac" : osName.contains("linux") ? "linux" : "unknown"
+    }
+
+    String getDriverLocation() {
+        def arch = calcArch()
+        def folder = arch == "win" ? "windows" : arch
+        driverLocation = "$targetDir/$folder/chromedriver${arch.equals('win') ? '.exe' : ''}"
+        return driverLocation
+    }
+
+    private boolean isChromedriverUptodate() {
+        if (latestVersion == localVersion  && localVersion != "unknown") {
+            println("Your Chromedriver is up to date (version $localVersion)")
+            return true;
+        }
+        return false;
+    }
+
+    private updateChromedriver() {
+        if (latestVersion == localVersion && localVersion != "unknown") {
+            println("Great! Your Chromedriver is already up to date (version $localVersion)")
+        } else {
+            def latestDriverBaseUrl = "$chromedriverSiteUrl/$latestVersion"
+            new File(project.buildDir.toString()).mkdir()
+            println("Downloading Chromedriver $latestVersion from $latestDriverBaseUrl ...")
+            downloadFile("$chromedriverSiteUrl/LATEST_RELEASE", LOCAL_VER)
+            def arch = calcArch()
+            def folder = arch == "win" ? "windows" : arch
+            def bit = arch.equals('win') ? '32' : '64'
+            downloadAndUnzip("$latestDriverBaseUrl", "chromedriver_${arch}${bit}.zip", "$targetDir/${folder}")
+            println("The latest Chromedriver is available in $targetDir")
+        }
+    }
+
+    private String getLatestVersion() {
+        def target = new File("$targetDir/LATEST_RELEASE")
+        downloadFile("$chromedriverSiteUrl/LATEST_RELEASE", target)
+        return target.text.trim()
+    }
+
+    private String getLocalVersion() {
+        def ver = ""
+
+        try {
+            def file = new File(LOCAL_VER)
+            if (file.exists()) {
+                ver = file.text.trim()
+                logger.info("Local Chromedriver version is $ver")
+            }
+        } catch (e) {
+            getLogger().error("Error reading file", e)
+        }
+        ver
+    }
+
+    private void downloadAndUnzip(def remoteZipURL, def zipName, String localDir) {
+        String tmpZipFile = "$targetDir/tempZip"
+        downloadFile("$remoteZipURL/$zipName", tmpZipFile)
+        new File(localDir).mkdirs()
+        ant.unzip(src: tmpZipFile, dest: localDir)
+        new File(tmpZipFile).delete()
+    }
+
+    @SuppressWarnings("GroovyUnusedDeclaration")
+    @TaskAction
+    def chromedriverAction() {
+        new File("$targetDir").mkdirs()
+        latestVersion = getLatestVersion()
+        localVersion = getLocalVersion()
+        if (!isChromedriverUptodate()) {
+            updateChromedriver()
+            println("webdriver.chrome.driver=$driverLocation")
+            ant.chmod(perm: "755", file: driverLocation)
+        }
+    }
+}
+
+plugins {
+    id 'java'
+}
+
+group 'org.challenge'
+version '1.0'
+
+sourceCompatibility = 1.8
+
+repositories {
+    mavenCentral()
+}
+
+dependencies {
+    compile group: 'com.fasterxml.jackson.core', name: 'jackson-databind', version: '2.10.3'
+    compile group: 'org.apache.commons', name: 'commons-lang3', version: '3.9'
+    compile group: 'org.seleniumhq.selenium', name: 'selenium-java', version: '3.141.59'
+
+    testCompile group: 'org.testng', name: 'testng', version: '7.1.0'
+    testCompile group: 'io.rest-assured', name: 'rest-assured', version: '3.0.0'
+    compile group: 'javax.xml.bind', name: 'jaxb-api', version: '2.3.1'
+}
+
+
+// task to download chromedriver
+task downloadWebDriver(dependsOn : 'classes', type : ChromeDriverUpdaterTask)
+
+compileTestJava.dependsOn downloadWebDriver
+
+// task to run tests
+def apiTest = project.hasProperty("api")
+def uiTest = project.hasProperty("ui")
+
+test {
+    useTestNG() {
+        useDefaultListeners = true
+        if (apiTest) {
+            suites "src/test/resources/apiTest.xml"
+        }
+        if (uiTest) {
+            suites "src/test/resources/uiTest.xml"
+        }
+    }
+
+    testLogging {
+        events "PASSED", "FAILED", "SKIPPED"
+    }
+    reports.html.enabled(false)
+}
+
